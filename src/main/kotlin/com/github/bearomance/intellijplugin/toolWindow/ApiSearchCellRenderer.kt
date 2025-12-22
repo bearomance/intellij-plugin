@@ -1,4 +1,4 @@
-package com.github.bearomance.intellijplugin.action
+package com.github.bearomance.intellijplugin.toolWindow
 
 import com.github.bearomance.intellijplugin.model.ApiEndpoint
 import java.awt.Component
@@ -7,7 +7,7 @@ import javax.swing.JLabel
 import javax.swing.JList
 import javax.swing.ListCellRenderer
 
-class ApiPopupCellRenderer : ListCellRenderer<ApiEndpoint> {
+class ApiSearchCellRenderer : ListCellRenderer<ApiEndpoint> {
     private val label = JLabel()
 
     override fun getListCellRendererComponent(

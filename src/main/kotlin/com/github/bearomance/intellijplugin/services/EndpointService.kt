@@ -59,7 +59,7 @@ class EndpointService(private val project: Project) : Disposable {
     }
 
     /**
-     * 异步重建索引（使用非阻塞读取）
+     * 异步重建索引（带进度条）
      */
     private fun rebuildIndexAsync() {
         if (isScanning) {
@@ -70,41 +70,49 @@ class EndpointService(private val project: Project) : Disposable {
         logger.info("Starting async index rebuild...")
         isScanning = true
 
-        ReadAction.nonBlocking<List<ApiEndpoint>> {
-            logger.info("NonBlocking ReadAction started")
-            val result = mutableListOf<ApiEndpoint>()
-            val scope = GlobalSearchScope.allScope(project)
-            val psiFacade = JavaPsiFacade.getInstance(project)
+        com.intellij.openapi.progress.ProgressManager.getInstance().run(
+            object : com.intellij.openapi.progress.Task.Backgroundable(
+                project, "Indexing API Endpoints", false
+            ) {
+                override fun run(indicator: com.intellij.openapi.progress.ProgressIndicator) {
+                    indicator.isIndeterminate = false
+                    indicator.text = "Scanning controllers..."
 
-            for (controllerAnnotation in CONTROLLER_ANNOTATIONS) {
-                logger.info("Searching for: $controllerAnnotation")
-                val annotationClass = psiFacade.findClass(controllerAnnotation, scope)
-                if (annotationClass == null) {
-                    logger.info("Annotation class not found: $controllerAnnotation")
-                    continue
-                }
+                    val result = ReadAction.compute<List<ApiEndpoint>, Throwable> {
+                        val endpoints = mutableListOf<ApiEndpoint>()
+                        val scope = GlobalSearchScope.allScope(project)
+                        val psiFacade = JavaPsiFacade.getInstance(project)
 
-                val projectScope = GlobalSearchScope.projectScope(project)
-                val controllers = AnnotatedElementsSearch.searchPsiClasses(annotationClass, projectScope).findAll()
-                logger.info("Found ${controllers.size} controllers")
+                        val annotations = CONTROLLER_ANNOTATIONS
+                        for ((index, controllerAnnotation) in annotations.withIndex()) {
+                            indicator.fraction = index.toDouble() / annotations.size * 0.3
 
-                for (controller in controllers) {
-                    val classPath = getClassLevelPath(controller)
-                    result.addAll(scanControllerMethods(controller, classPath))
+                            val annotationClass = psiFacade.findClass(controllerAnnotation, scope) ?: continue
+                            val projectScope = GlobalSearchScope.projectScope(project)
+                            val controllers = AnnotatedElementsSearch.searchPsiClasses(annotationClass, projectScope).findAll()
+
+                            for ((cIndex, controller) in controllers.withIndex()) {
+                                indicator.text2 = controller.name ?: ""
+                                indicator.fraction = 0.3 + (index.toDouble() / annotations.size +
+                                    cIndex.toDouble() / controllers.size / annotations.size) * 0.7
+
+                                val classPath = getClassLevelPath(controller)
+                                endpoints.addAll(scanControllerMethods(controller, classPath))
+                            }
+                        }
+                        endpoints
+                    }
+
+                    indicator.fraction = 1.0
+                    indicator.text = "Found ${result.size} endpoints"
+
+                    cachedEndpoints = result
+                    isInitialized = true
+                    isScanning = false
+                    logger.info("Index built: ${result.size} endpoints")
                 }
             }
-            logger.info("Scan complete: ${result.size} endpoints")
-            result
-        }
-        .inSmartMode(project)
-        .finishOnUiThread(com.intellij.openapi.application.ModalityState.defaultModalityState()) { endpoints ->
-            cachedEndpoints = endpoints
-            isInitialized = true
-            isScanning = false
-            logger.info("Index built and cached: ${endpoints.size} endpoints")
-        }
-        .expireWith(this)
-        .submit(com.intellij.util.concurrency.AppExecutorUtil.getAppExecutorService())
+        )
     }
 
     override fun dispose() {
@@ -157,8 +165,8 @@ class EndpointService(private val project: Project) : Disposable {
         // 解析 HTTP 方法和路径
         val (httpMethod, pathQuery) = parseQuery(normalizedQuery)
 
-        // 生成搜索变体
-        val searchQueries = buildSearchQueries(pathQuery)
+        // 搜索查询
+        val searchQuery = pathQuery
 
         return allEndpoints.filter { endpoint ->
             // 标准化路径：将 {userId}, {id} 等统一为 {id}
@@ -169,9 +177,9 @@ class EndpointService(private val project: Project) : Disposable {
             // 如果指定了 HTTP 方法，必须匹配
             val methodMatches = httpMethod == null || endpoint.method.lowercase() == httpMethod
 
-            val contentMatches = searchQueries.any { q ->
-                pathLower.contains(q) || methodLower.contains(q) || moduleLower.contains(q)
-            }
+            val contentMatches = pathLower.contains(searchQuery) ||
+                methodLower.contains(searchQuery) ||
+                moduleLower.contains(searchQuery)
 
             methodMatches && contentMatches
         }
@@ -218,43 +226,30 @@ class EndpointService(private val project: Project) : Disposable {
             path = path.substring(0, queryIndex)
         }
 
-        // 将纯数字路径段替换为占位符 (/user/12345 -> /user/{id})
+        // 将纯数字路径段替换为占位符 (/user/12345 -> /user/{*})
         path = path.split("/").joinToString("/") { segment ->
-            if (segment.matches(Regex("^\\d+$"))) "{id}" else segment
+            if (segment.matches(Regex("^\\d+$"))) "{*}" else segment
         }
 
-        // 将所有 {xxx} 占位符统一为 {id}，方便匹配
+        // 标准化所有占位符
         path = normalizePathForMatch(path)
 
         return path
     }
 
     /**
-     * 标准化路径用于匹配，将所有 {xxx} 占位符统一为 {id}
+     * 标准化路径用于匹配
+     * - {userId}, {id}, {} -> {*}
+     * - // -> /{*}/
      */
     private fun normalizePathForMatch(path: String): String {
-        return path.replace(Regex("\\{[^}]+\\}"), "{id}")
+        var result = path
+        // 将所有 {xxx} 或 {} 统一为 {*}
+        result = result.replace(Regex("\\{[^}]*\\}"), "{*}")
+        // 将 // 替换为 /{*}/
+        result = result.replace("//", "/{*}/")
+        return result
     }
-
-    /**
-     * 构建搜索查询变体
-     * /api/user/info -> ["/api/user/info", "/api/info"]
-     */
-    private fun buildSearchQueries(query: String): List<String> {
-        val queries = mutableListOf(query)
-
-        // 匹配 /api/{service-name}/xxx 格式
-        val apiPattern = Regex("^/api/([^/]+)/(.+)$")
-        val match = apiPattern.find(query)
-
-        if (match != null) {
-            val restPath = match.groupValues[2]  // xxx 部分
-            queries.add("/api/$restPath")
-        }
-
-        return queries
-    }
-
     private fun getClassLevelPath(psiClass: PsiClass): String {
         val requestMapping = psiClass.getAnnotation("org.springframework.web.bind.annotation.RequestMapping")
         return requestMapping?.let { extractPath(it) } ?: ""
