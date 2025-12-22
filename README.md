@@ -1,52 +1,56 @@
-# intellij-plugin
+# API Search
 
-![Build](https://github.com/bearomance/intellij-plugin/workflows/Build/badge.svg)
-[![Version](https://img.shields.io/jetbrains/plugin/v/MARKETPLACE_ID.svg)](https://plugins.jetbrains.com/plugin/MARKETPLACE_ID)
-[![Downloads](https://img.shields.io/jetbrains/plugin/d/MARKETPLACE_ID.svg)](https://plugins.jetbrains.com/plugin/MARKETPLACE_ID)
+快速搜索 Spring API 端点的 IntelliJ IDEA 插件。
 
-## Template ToDo list
-- [x] Create a new [IntelliJ Platform Plugin Template][template] project.
-- [ ] Get familiar with the [template documentation][template].
-- [ ] Adjust the [pluginGroup](./gradle.properties) and [pluginName](./gradle.properties), as well as the [id](./src/main/resources/META-INF/plugin.xml) and [sources package](./src/main/kotlin).
-- [ ] Adjust the plugin description in `README` (see [Tips][docs:plugin-description])
-- [ ] Review the [Legal Agreements](https://plugins.jetbrains.com/docs/marketplace/legal-agreements.html?from=IJPluginTemplate).
-- [ ] [Publish a plugin manually](https://plugins.jetbrains.com/docs/intellij/publishing-plugin.html?from=IJPluginTemplate) for the first time.
-- [ ] Set the `MARKETPLACE_ID` in the above README badges. You can obtain it once the plugin is published to JetBrains Marketplace.
-- [ ] Set the [Plugin Signing](https://plugins.jetbrains.com/docs/intellij/plugin-signing.html?from=IJPluginTemplate) related [secrets](https://github.com/JetBrains/intellij-platform-plugin-template#environment-variables).
-- [ ] Set the [Deployment Token](https://plugins.jetbrains.com/docs/marketplace/plugin-upload.html?from=IJPluginTemplate).
-- [ ] Click the <kbd>Watch</kbd> button on the top of the [IntelliJ Platform Plugin Template][template] to be notified about releases containing new features and fixes.
-- [ ] Configure the [CODECOV_TOKEN](https://docs.codecov.com/docs/quick-start) secret for automated test coverage reports on PRs
+## 功能
 
-<!-- Plugin description -->
-This Fancy IntelliJ Platform Plugin is going to be your implementation of the brilliant ideas that you have.
+- 🔍 **快速搜索** - 通过 URL 路径快速定位 Spring Controller 方法
+- ⚡ **实时索引** - 项目打开时自动索引，文件变化时自动更新
+- 🎯 **一键跳转** - 回车或双击直接跳转到对应方法
+- 📦 **多模块支持** - 支持多模块项目，显示模块名称
+- 🎨 **HTTP 方法高亮** - GET/POST/PUT/DELETE 等方法用不同颜色区分
 
-This specific section is a source for the [plugin.xml](/src/main/resources/META-INF/plugin.xml) file which will be extracted by the [Gradle](/build.gradle.kts) during the build process.
+## 支持的注解
 
-To keep everything working, do not remove `<!-- ... -->` sections. 
-<!-- Plugin description end -->
+- `@RequestMapping`
+- `@GetMapping`
+- `@PostMapping`
+- `@PutMapping`
+- `@DeleteMapping`
+- `@PatchMapping`
 
-## Installation
+## 使用方法
 
-- Using the IDE built-in plugin system:
+1. 按 <kbd>Option</kbd> + <kbd>F</kbd>（macOS）或 <kbd>Alt</kbd> + <kbd>F</kbd>（Windows/Linux）打开搜索面板
+2. 输入 URL 路径关键词进行搜索
+3. 使用 <kbd>↑</kbd> <kbd>↓</kbd> 键选择结果
+4. 按 <kbd>Enter</kbd> 或双击跳转到对应方法
+5. 再次按 <kbd>Option</kbd> + <kbd>F</kbd> 关闭面板并恢复之前的侧边栏
 
-  <kbd>Settings/Preferences</kbd> > <kbd>Plugins</kbd> > <kbd>Marketplace</kbd> > <kbd>Search for "intellij-plugin"</kbd> >
-  <kbd>Install</kbd>
+## 安装
 
-- Using JetBrains Marketplace:
+### 从本地安装
 
-  Go to [JetBrains Marketplace](https://plugins.jetbrains.com/plugin/MARKETPLACE_ID) and install it by clicking the <kbd>Install to ...</kbd> button in case your IDE is running.
+1. 下载或构建插件 zip 文件
+2. <kbd>Settings</kbd> > <kbd>Plugins</kbd> > <kbd>⚙️</kbd> > <kbd>Install plugin from disk...</kbd>
+3. 选择 zip 文件并重启 IDE
 
-  You can also download the [latest release](https://plugins.jetbrains.com/plugin/MARKETPLACE_ID/versions) from JetBrains Marketplace and install it manually using
-  <kbd>Settings/Preferences</kbd> > <kbd>Plugins</kbd> > <kbd>⚙️</kbd> > <kbd>Install plugin from disk...</kbd>
+### 从源码构建
 
-- Manually:
+```bash
+./gradlew buildPlugin
+```
 
-  Download the [latest release](https://github.com/bearomance/intellij-plugin/releases/latest) and install it manually using
-  <kbd>Settings/Preferences</kbd> > <kbd>Plugins</kbd> > <kbd>⚙️</kbd> > <kbd>Install plugin from disk...</kbd>
+构建产物位于 `build/distributions/` 目录。
 
+## 开发
 
----
-Plugin based on the [IntelliJ Platform Plugin Template][template].
+```bash
+# 运行开发版 IDE
+./gradlew runIde
+```
 
-[template]: https://github.com/JetBrains/intellij-platform-plugin-template
-[docs:plugin-description]: https://plugins.jetbrains.com/docs/intellij/plugin-user-experience.html#plugin-description-and-presentation
+## 要求
+
+- IntelliJ IDEA 2024.2+
+- Java 插件
