@@ -5,11 +5,22 @@
     <vendor>bearomance</vendor>
 
     <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.java</depends>
 
     <resource-bundle>messages.MyBundle</resource-bundle>
 
     <extensions defaultExtensionNs="com.intellij">
-        <toolWindow factoryClass="com.github.bearomance.intellijplugin.toolWindow.MyToolWindowFactory" id="MyToolWindow"/>
-        <postStartupActivity implementation="com.github.bearomance.intellijplugin.startup.MyProjectActivity" />
     </extensions>
+
+    <actions>
+        <action id="SearchApiAction"
+                class="com.github.bearomance.intellijplugin.action.SearchApiAction"
+                text="Search API Endpoints"
+                description="Search Spring API endpoints by URL">
+            <keyboard-shortcut keymap="$default" first-keystroke="alt F"/>
+            <keyboard-shortcut keymap="Mac OS X" first-keystroke="alt F"/>
+            <keyboard-shortcut keymap="Mac OS X 10.5+" first-keystroke="alt F"/>
+            <add-to-group group-id="GoToMenu" anchor="last"/>
+        </action>
+    </actions>
 </idea-plugin>
