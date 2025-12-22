@@ -188,9 +188,6 @@ class SearchApiAction : AnAction(), DumbAware {
             }
         })
 
-        // 初始加载所有端点
-        performSearch()
-
         popup.showCenteredInCurrentWindow(project)
     }
 }

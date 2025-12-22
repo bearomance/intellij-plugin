@@ -141,6 +141,11 @@ class EndpointService(private val project: Project) : Disposable {
 
     /**
      * 根据 URL 搜索匹配的端点（直接从缓存读取，不阻塞）
+     *
+     * 支持格式：
+     * - /api/info
+     * - POST /api/info
+     * - /api/user/info (会同时搜索 /api/info)
      */
     fun searchEndpoints(query: String): List<ApiEndpoint> {
         val allEndpoints = cachedEndpoints
@@ -149,11 +154,105 @@ class EndpointService(private val project: Project) : Disposable {
 
         val normalizedQuery = query.trim().lowercase()
 
+        // 解析 HTTP 方法和路径
+        val (httpMethod, pathQuery) = parseQuery(normalizedQuery)
+
+        // 生成搜索变体
+        val searchQueries = buildSearchQueries(pathQuery)
+
         return allEndpoints.filter { endpoint ->
-            endpoint.path.lowercase().contains(normalizedQuery) ||
-            endpoint.methodName.lowercase().contains(normalizedQuery) ||
-            endpoint.moduleName.lowercase().contains(normalizedQuery)
+            // 标准化路径：将 {userId}, {id} 等统一为 {id}
+            val pathLower = normalizePathForMatch(endpoint.path.lowercase())
+            val methodLower = endpoint.methodName.lowercase()
+            val moduleLower = endpoint.moduleName.lowercase()
+
+            // 如果指定了 HTTP 方法，必须匹配
+            val methodMatches = httpMethod == null || endpoint.method.lowercase() == httpMethod
+
+            val contentMatches = searchQueries.any { q ->
+                pathLower.contains(q) || methodLower.contains(q) || moduleLower.contains(q)
+            }
+
+            methodMatches && contentMatches
         }
+    }
+
+    /**
+     * 解析查询，提取 HTTP 方法和路径
+     * "POST /api/info" -> ("post", "/api/info")
+     * "/api/info" -> (null, "/api/info")
+     * "https://example.com/api/info?a=1" -> (null, "/api/info")
+     */
+    private fun parseQuery(query: String): Pair<String?, String> {
+        val httpMethods = listOf("get", "post", "put", "delete", "patch")
+        val parts = query.split(" ", limit = 2)
+
+        val (method, rawPath) = if (parts.size == 2 && parts[0] in httpMethods) {
+            Pair(parts[0], parts[1])
+        } else {
+            Pair(null, query)
+        }
+
+        // 清理路径：移除域名和查询参数
+        val cleanPath = cleanUrl(rawPath)
+
+        return Pair(method, cleanPath)
+    }
+
+    /**
+     * 清理 URL，提取路径部分
+     * "https://example.com/api/info?a=1" -> "/api/info"
+     * "/api/info?a=1" -> "/api/info"
+     * "/api/user/12345" -> "/api/user/{id}"
+     */
+    private fun cleanUrl(url: String): String {
+        var path = url
+
+        // 移除协议和域名 (https://xxx.com/api/... -> /api/...)
+        val protocolPattern = Regex("^https?://[^/]+")
+        path = protocolPattern.replace(path, "")
+
+        // 移除查询参数 (?xxx=yyy)
+        val queryIndex = path.indexOf('?')
+        if (queryIndex != -1) {
+            path = path.substring(0, queryIndex)
+        }
+
+        // 将纯数字路径段替换为占位符 (/user/12345 -> /user/{id})
+        path = path.split("/").joinToString("/") { segment ->
+            if (segment.matches(Regex("^\\d+$"))) "{id}" else segment
+        }
+
+        // 将所有 {xxx} 占位符统一为 {id}，方便匹配
+        path = normalizePathForMatch(path)
+
+        return path
+    }
+
+    /**
+     * 标准化路径用于匹配，将所有 {xxx} 占位符统一为 {id}
+     */
+    private fun normalizePathForMatch(path: String): String {
+        return path.replace(Regex("\\{[^}]+\\}"), "{id}")
+    }
+
+    /**
+     * 构建搜索查询变体
+     * /api/user/info -> ["/api/user/info", "/api/info"]
+     */
+    private fun buildSearchQueries(query: String): List<String> {
+        val queries = mutableListOf(query)
+
+        // 匹配 /api/{service-name}/xxx 格式
+        val apiPattern = Regex("^/api/([^/]+)/(.+)$")
+        val match = apiPattern.find(query)
+
+        if (match != null) {
+            val restPath = match.groupValues[2]  // xxx 部分
+            queries.add("/api/$restPath")
+        }
+
+        return queries
     }
 
     private fun getClassLevelPath(psiClass: PsiClass): String {
