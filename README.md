@@ -2,6 +2,10 @@
 
 快速搜索 Spring API 端点的 IntelliJ IDEA 插件。
 
+<!-- Plugin description -->
+快速搜索 Spring API 端点的 IntelliJ IDEA 插件。通过 URL 路径快速定位 Controller 方法，支持多模块项目，HTTP 方法高亮显示。
+<!-- Plugin description end -->
+
 ## 功能
 
 - 🔍 **快速搜索** - 通过 URL 路径快速定位 Spring Controller 方法

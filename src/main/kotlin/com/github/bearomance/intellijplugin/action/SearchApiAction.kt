@@ -31,10 +31,10 @@ class SearchApiAction : AnAction(), DumbAware {
                 previousToolWindowMap.remove(project)
             }
         } else {
-            // 记录当前右侧活跃的 Tool Window
+            // 记录当前底部活跃的 Tool Window
             val currentActiveId = toolWindowManager.toolWindowIds
                 .mapNotNull { toolWindowManager.getToolWindow(it) }
-                .firstOrNull { it.isVisible && it.anchor == ToolWindowAnchor.RIGHT && it.id != "API Search" }
+                .firstOrNull { it.isVisible && it.anchor == ToolWindowAnchor.BOTTOM && it.id != "API Search" }
                 ?.id
             previousToolWindowMap[project] = currentActiveId
 

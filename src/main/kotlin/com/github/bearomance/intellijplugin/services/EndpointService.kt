@@ -33,20 +33,31 @@ class EndpointService(private val project: Project) : Disposable {
     @Volatile
     private var isInitialized = false
 
+    @Volatile
+    private var lastIndexTime = 0L
+
+
+
     init {
         // 监听文件变化，自动刷新缓存
         project.messageBus.connect(this).subscribe(
             VirtualFileManager.VFS_CHANGES,
             object : BulkFileListener {
                 override fun after(events: List<VFileEvent>) {
-                    // 只关心 Java/Kotlin 文件变化
-                    val hasRelevantChange = events.any { event ->
+                    // 只关心可能是 Controller 的文件变化
+                    val hasControllerChange = events.any { event ->
                         val path = event.path
-                        path.endsWith(".java") || path.endsWith(".kt")
+                        (path.endsWith(".java") || path.endsWith(".kt")) &&
+                            (path.contains("Controller") || path.contains("Resource"))
                     }
-                    if (hasRelevantChange && isInitialized) {
-                        logger.info("Detected file change, rebuilding index in background")
-                        rebuildIndexAsync()
+                    if (hasControllerChange && isInitialized) {
+                        val now = System.currentTimeMillis()
+                        if (now - lastIndexTime >= MIN_INDEX_INTERVAL_MS) {
+                            logger.info("Detected controller file change, rebuilding index in background")
+                            rebuildIndexAsync()
+                        } else {
+                            logger.info("Skipping index rebuild, last index was ${(now - lastIndexTime) / 1000}s ago")
+                        }
                     }
                 }
             }
@@ -56,6 +67,15 @@ class EndpointService(private val project: Project) : Disposable {
         DumbService.getInstance(project).runWhenSmart {
             rebuildIndexAsync()
         }
+    }
+
+    /**
+     * 手动刷新索引（忽略时间限制）
+     */
+    fun forceRebuildIndex() {
+        logger.info("Force rebuild index requested")
+        lastIndexTime = 0L // 重置时间限制
+        rebuildIndexAsync()
     }
 
     /**
@@ -75,41 +95,47 @@ class EndpointService(private val project: Project) : Disposable {
                 project, "Indexing API Endpoints", false
             ) {
                 override fun run(indicator: com.intellij.openapi.progress.ProgressIndicator) {
-                    indicator.isIndeterminate = false
-                    indicator.text = "Scanning controllers..."
+                    try {
+                        indicator.isIndeterminate = false
+                        indicator.text = "Scanning controllers..."
 
-                    val result = ReadAction.compute<List<ApiEndpoint>, Throwable> {
-                        val endpoints = mutableListOf<ApiEndpoint>()
-                        val scope = GlobalSearchScope.allScope(project)
-                        val psiFacade = JavaPsiFacade.getInstance(project)
+                        val result = ReadAction.compute<List<ApiEndpoint>, Throwable> {
+                            val endpoints = mutableListOf<ApiEndpoint>()
+                            val scope = GlobalSearchScope.allScope(project)
+                            val psiFacade = JavaPsiFacade.getInstance(project)
 
-                        val annotations = CONTROLLER_ANNOTATIONS
-                        for ((index, controllerAnnotation) in annotations.withIndex()) {
-                            indicator.fraction = index.toDouble() / annotations.size * 0.3
+                            val annotations = CONTROLLER_ANNOTATIONS
+                            for ((index, controllerAnnotation) in annotations.withIndex()) {
+                                indicator.fraction = index.toDouble() / annotations.size * 0.3
 
-                            val annotationClass = psiFacade.findClass(controllerAnnotation, scope) ?: continue
-                            val projectScope = GlobalSearchScope.projectScope(project)
-                            val controllers = AnnotatedElementsSearch.searchPsiClasses(annotationClass, projectScope).findAll()
+                                val annotationClass = psiFacade.findClass(controllerAnnotation, scope) ?: continue
+                                val projectScope = GlobalSearchScope.projectScope(project)
+                                val controllers = AnnotatedElementsSearch.searchPsiClasses(annotationClass, projectScope).findAll()
 
-                            for ((cIndex, controller) in controllers.withIndex()) {
-                                indicator.text2 = controller.name ?: ""
-                                indicator.fraction = 0.3 + (index.toDouble() / annotations.size +
-                                    cIndex.toDouble() / controllers.size / annotations.size) * 0.7
+                                for ((cIndex, controller) in controllers.withIndex()) {
+                                    indicator.text2 = controller.name ?: ""
+                                    indicator.fraction = 0.3 + (index.toDouble() / annotations.size +
+                                        cIndex.toDouble() / controllers.size / annotations.size) * 0.7
 
-                                val classPath = getClassLevelPath(controller)
-                                endpoints.addAll(scanControllerMethods(controller, classPath))
+                                    val classPath = getClassLevelPath(controller)
+                                    endpoints.addAll(scanControllerMethods(controller, classPath))
+                                }
                             }
+                            endpoints
                         }
-                        endpoints
+
+                        indicator.fraction = 1.0
+                        indicator.text = "Found ${result.size} endpoints"
+
+                        cachedEndpoints = result
+                        isInitialized = true
+                        lastIndexTime = System.currentTimeMillis()
+                        logger.info("Index built: ${result.size} endpoints")
+                    } catch (e: Exception) {
+                        logger.error("Error during indexing", e)
+                    } finally {
+                        isScanning = false
                     }
-
-                    indicator.fraction = 1.0
-                    indicator.text = "Found ${result.size} endpoints"
-
-                    cachedEndpoints = result
-                    isInitialized = true
-                    isScanning = false
-                    logger.info("Index built: ${result.size} endpoints")
                 }
             }
         )
@@ -120,6 +146,8 @@ class EndpointService(private val project: Project) : Disposable {
     }
 
     companion object {
+        private const val MIN_INDEX_INTERVAL_MS = 10 * 60 * 1000L // 10 minutes
+
         private val CONTROLLER_ANNOTATIONS = listOf(
             "org.springframework.stereotype.Controller",
             "org.springframework.web.bind.annotation.RestController"

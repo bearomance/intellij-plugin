@@ -12,7 +12,7 @@
     <extensions defaultExtensionNs="com.intellij">
         <postStartupActivity implementation="com.github.bearomance.intellijplugin.startup.EndpointIndexStartupActivity"/>
         <toolWindow id="API Search"
-                    anchor="right"
+                    anchor="bottom"
                     factoryClass="com.github.bearomance.intellijplugin.toolWindow.ApiSearchToolWindowFactory"
                     icon="AllIcons.Actions.Search"/>
     </extensions>
