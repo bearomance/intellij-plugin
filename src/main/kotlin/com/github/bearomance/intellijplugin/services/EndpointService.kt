@@ -1,19 +1,23 @@
 package com.github.bearomance.intellijplugin.services
 
 import com.github.bearomance.intellijplugin.model.ApiEndpoint
+import com.github.bearomance.intellijplugin.model.PersistedEndpoint
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.components.Service
+import com.intellij.openapi.components.service
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.DumbService
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.roots.ProjectFileIndex
+import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VirtualFileManager
 import com.intellij.openapi.vfs.newvfs.BulkFileListener
 import com.intellij.openapi.vfs.newvfs.events.VFileEvent
 import com.intellij.psi.JavaPsiFacade
 import com.intellij.psi.PsiAnnotation
 import com.intellij.psi.PsiClass
+import com.intellij.psi.PsiManager
 import com.intellij.psi.PsiMethod
 import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.search.searches.AnnotatedElementsSearch
@@ -22,6 +26,7 @@ import com.intellij.psi.search.searches.AnnotatedElementsSearch
 class EndpointService(private val project: Project) : Disposable {
 
     private val logger = Logger.getInstance(EndpointService::class.java)
+    private val persistence by lazy { project.service<EndpointIndexPersistence>() }
 
     // 缓存扫描结果
     @Volatile
@@ -36,7 +41,8 @@ class EndpointService(private val project: Project) : Disposable {
     @Volatile
     private var lastIndexTime = 0L
 
-
+    // 文件路径 -> 该文件的端点列表（用于增量更新）
+    private val endpointsByFile = mutableMapOf<String, MutableList<ApiEndpoint>>()
 
     init {
         // 监听文件变化，自动刷新缓存
@@ -44,17 +50,21 @@ class EndpointService(private val project: Project) : Disposable {
             VirtualFileManager.VFS_CHANGES,
             object : BulkFileListener {
                 override fun after(events: List<VFileEvent>) {
-                    // 只关心可能是 Controller 的文件变化
-                    val hasControllerChange = events.any { event ->
-                        val path = event.path
-                        (path.endsWith(".java") || path.endsWith(".kt")) &&
-                            (path.contains("Controller") || path.contains("Resource"))
-                    }
-                    if (hasControllerChange && isInitialized) {
+                    // 收集变化的 Controller 文件
+                    val changedFiles = events
+                        .filter { event ->
+                            val path = event.path
+                            (path.endsWith(".java") || path.endsWith(".kt")) &&
+                                (path.contains("Controller") || path.contains("Resource"))
+                        }
+                        .mapNotNull { it.file?.path }
+                        .toSet()
+
+                    if (changedFiles.isNotEmpty() && isInitialized) {
                         val now = System.currentTimeMillis()
                         if (now - lastIndexTime >= MIN_INDEX_INTERVAL_MS) {
-                            logger.info("Detected controller file change, rebuilding index in background")
-                            rebuildIndexAsync()
+                            logger.info("Detected ${changedFiles.size} controller file(s) changed, incremental update")
+                            incrementalUpdateAsync(changedFiles)
                         } else {
                             logger.info("Skipping index rebuild, last index was ${(now - lastIndexTime) / 1000}s ago")
                         }
@@ -63,31 +73,57 @@ class EndpointService(private val project: Project) : Disposable {
             }
         )
 
-        // 等待索引完成后，异步构建缓存
+        // 等待索引完成后，尝试从持久化加载或重建
         DumbService.getInstance(project).runWhenSmart {
-            rebuildIndexAsync()
+            loadOrRebuildIndex()
         }
     }
 
     /**
-     * 手动刷新索引（忽略时间限制）
+     * 手动刷新索引（忽略时间限制，全量重建）
      */
     fun forceRebuildIndex() {
         logger.info("Force rebuild index requested")
-        lastIndexTime = 0L // 重置时间限制
+        lastIndexTime = 0L
+        rebuildIndexAsync(force = true)
+    }
+
+    /**
+     * 从持久化加载索引，如果无效则重建
+     */
+    private fun loadOrRebuildIndex() {
+        val state = persistence.state
+        if (state.endpoints.isNotEmpty()) {
+            logger.info("Loading ${state.endpoints.size} endpoints from persistence")
+
+            // 从持久化数据恢复
+            val restored = restoreEndpointsFromPersistence(state.endpoints)
+            if (restored.isNotEmpty()) {
+                cachedEndpoints = restored
+                lastIndexTime = state.lastIndexTime
+                isInitialized = true
+                logger.info("Restored ${restored.size} endpoints from persistence")
+
+                // 后台检查是否需要增量更新
+                checkForUpdatesAsync()
+                return
+            }
+        }
+
+        // 持久化数据无效，全量重建
         rebuildIndexAsync()
     }
 
     /**
      * 异步重建索引（带进度条）
      */
-    private fun rebuildIndexAsync() {
+    private fun rebuildIndexAsync(force: Boolean = false) {
         if (isScanning) {
             logger.info("Already scanning, skip")
             return
         }
 
-        logger.info("Starting async index rebuild...")
+        logger.info("Starting async index rebuild (force=$force)...")
         isScanning = true
 
         com.intellij.openapi.progress.ProgressManager.getInstance().run(
@@ -101,6 +137,7 @@ class EndpointService(private val project: Project) : Disposable {
 
                         val result = ReadAction.compute<List<ApiEndpoint>, Throwable> {
                             val endpoints = mutableListOf<ApiEndpoint>()
+                            endpointsByFile.clear()
                             val scope = GlobalSearchScope.allScope(project)
                             val psiFacade = JavaPsiFacade.getInstance(project)
 
@@ -118,7 +155,15 @@ class EndpointService(private val project: Project) : Disposable {
                                         cIndex.toDouble() / controllers.size / annotations.size) * 0.7
 
                                     val classPath = getClassLevelPath(controller)
-                                    endpoints.addAll(scanControllerMethods(controller, classPath))
+                                    val controllerEndpoints = scanControllerMethods(controller, classPath)
+                                    endpoints.addAll(controllerEndpoints)
+
+                                    // 按文件分组存储
+                                    val filePath = controller.containingFile?.virtualFile?.path
+                                    if (filePath != null) {
+                                        endpointsByFile.getOrPut(filePath) { mutableListOf() }
+                                            .addAll(controllerEndpoints)
+                                    }
                                 }
                             }
                             endpoints
@@ -130,6 +175,10 @@ class EndpointService(private val project: Project) : Disposable {
                         cachedEndpoints = result
                         isInitialized = true
                         lastIndexTime = System.currentTimeMillis()
+
+                        // 持久化索引
+                        persistIndex(result)
+
                         logger.info("Index built: ${result.size} endpoints")
                     } catch (e: Exception) {
                         logger.error("Error during indexing", e)
@@ -139,6 +188,194 @@ class EndpointService(private val project: Project) : Disposable {
                 }
             }
         )
+    }
+
+    /**
+     * 增量更新：只重新扫描变化的文件
+     */
+    private fun incrementalUpdateAsync(changedFiles: Set<String>) {
+        if (isScanning) {
+            logger.info("Already scanning, skip incremental update")
+            return
+        }
+
+        logger.info("Starting incremental update for ${changedFiles.size} files...")
+        isScanning = true
+
+        com.intellij.openapi.progress.ProgressManager.getInstance().run(
+            object : com.intellij.openapi.progress.Task.Backgroundable(
+                project, "Updating API Index", false
+            ) {
+                override fun run(indicator: com.intellij.openapi.progress.ProgressIndicator) {
+                    try {
+                        indicator.isIndeterminate = true
+                        indicator.text = "Updating changed files..."
+
+                        ReadAction.run<Throwable> {
+                            for (filePath in changedFiles) {
+                                // 移除该文件的旧端点
+                                endpointsByFile.remove(filePath)
+
+                                // 重新扫描该文件
+                                val vFile = LocalFileSystem.getInstance().findFileByPath(filePath) ?: continue
+                                val psiFile = PsiManager.getInstance(project).findFile(vFile) ?: continue
+
+                                val newEndpoints = mutableListOf<ApiEndpoint>()
+                                for (child in psiFile.children) {
+                                    if (child is PsiClass && isController(child)) {
+                                        val classPath = getClassLevelPath(child)
+                                        newEndpoints.addAll(scanControllerMethods(child, classPath))
+                                    }
+                                }
+
+                                if (newEndpoints.isNotEmpty()) {
+                                    endpointsByFile[filePath] = newEndpoints.toMutableList()
+                                }
+                            }
+                        }
+
+                        // 重建缓存
+                        cachedEndpoints = endpointsByFile.values.flatten()
+                        lastIndexTime = System.currentTimeMillis()
+
+                        // 持久化
+                        persistIndex(cachedEndpoints)
+
+                        logger.info("Incremental update complete: ${cachedEndpoints.size} endpoints")
+                    } catch (e: Exception) {
+                        logger.error("Error during incremental update", e)
+                    } finally {
+                        isScanning = false
+                    }
+                }
+            }
+        )
+    }
+
+    /**
+     * 检查是否有文件需要更新
+     */
+    private fun checkForUpdatesAsync() {
+        com.intellij.openapi.progress.ProgressManager.getInstance().run(
+            object : com.intellij.openapi.progress.Task.Backgroundable(
+                project, "Checking API Index", false
+            ) {
+                override fun run(indicator: com.intellij.openapi.progress.ProgressIndicator) {
+                    val state = persistence.state
+                    val changedFiles = mutableSetOf<String>()
+
+                    ReadAction.run<Throwable> {
+                        for ((filePath, timestamp) in state.fileTimestamps) {
+                            val vFile = LocalFileSystem.getInstance().findFileByPath(filePath)
+                            if (vFile == null || vFile.timeStamp != timestamp) {
+                                changedFiles.add(filePath)
+                            }
+                        }
+                    }
+
+                    if (changedFiles.isNotEmpty()) {
+                        logger.info("Found ${changedFiles.size} changed files, triggering incremental update")
+                        incrementalUpdateAsync(changedFiles)
+                    }
+                }
+            }
+        )
+    }
+
+    /**
+     * 判断类是否是 Controller
+     */
+    private fun isController(psiClass: PsiClass): Boolean {
+        return CONTROLLER_ANNOTATIONS.any { psiClass.hasAnnotation(it) }
+    }
+
+    /**
+     * 持久化索引到磁盘
+     */
+    private fun persistIndex(endpoints: List<ApiEndpoint>) {
+        val state = persistence.state
+        state.endpoints.clear()
+        state.fileTimestamps.clear()
+        state.lastIndexTime = lastIndexTime
+
+        for (endpoint in endpoints) {
+            val filePath = endpoint.psiMethod.containingFile?.virtualFile?.path ?: continue
+            val vFile = endpoint.psiMethod.containingFile?.virtualFile
+
+            state.endpoints.add(PersistedEndpoint(
+                method = endpoint.method,
+                path = endpoint.path,
+                className = endpoint.className,
+                methodName = endpoint.methodName,
+                moduleName = endpoint.moduleName,
+                filePath = filePath,
+                methodSignature = buildMethodSignature(endpoint.psiMethod)
+            ))
+
+            if (vFile != null) {
+                state.fileTimestamps[filePath] = vFile.timeStamp
+            }
+        }
+
+        logger.info("Persisted ${state.endpoints.size} endpoints")
+    }
+
+    /**
+     * 从持久化数据恢复端点
+     */
+    private fun restoreEndpointsFromPersistence(persisted: List<PersistedEndpoint>): List<ApiEndpoint> {
+        return ReadAction.compute<List<ApiEndpoint>, Throwable> {
+            val result = mutableListOf<ApiEndpoint>()
+
+            for (pe in persisted) {
+                val vFile = LocalFileSystem.getInstance().findFileByPath(pe.filePath) ?: continue
+                val psiFile = PsiManager.getInstance(project).findFile(vFile) ?: continue
+
+                // 查找对应的方法
+                val psiMethod = findMethodBySignature(psiFile, pe.className, pe.methodSignature)
+                if (psiMethod != null) {
+                    result.add(ApiEndpoint(
+                        method = pe.method,
+                        path = pe.path,
+                        psiMethod = psiMethod,
+                        className = pe.className,
+                        methodName = pe.methodName,
+                        moduleName = pe.moduleName
+                    ))
+
+                    // 重建 endpointsByFile
+                    endpointsByFile.getOrPut(pe.filePath) { mutableListOf() }.add(result.last())
+                }
+            }
+
+            result
+        }
+    }
+
+    /**
+     * 构建方法签名用于持久化
+     */
+    private fun buildMethodSignature(method: PsiMethod): String {
+        val params = method.parameterList.parameters.joinToString(",") {
+            it.type.canonicalText
+        }
+        return "${method.name}($params)"
+    }
+
+    /**
+     * 根据签名查找方法
+     */
+    private fun findMethodBySignature(psiFile: com.intellij.psi.PsiFile, className: String, signature: String): PsiMethod? {
+        for (child in psiFile.children) {
+            if (child is PsiClass && child.name == className) {
+                for (method in child.methods) {
+                    if (buildMethodSignature(method) == signature) {
+                        return method
+                    }
+                }
+            }
+        }
+        return null
     }
 
     override fun dispose() {
