@@ -2,6 +2,7 @@ package com.github.bearomance.intellijplugin.toolWindow
 
 import com.github.bearomance.intellijplugin.model.ApiEndpoint
 import com.github.bearomance.intellijplugin.services.EndpointService
+import com.github.bearomance.intellijplugin.settings.ApiSearchSettings
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.service
 import com.intellij.openapi.fileEditor.FileEditorManager
@@ -62,12 +63,26 @@ class ApiSearchPanel(private val project: Project) : JPanel(BorderLayout()) {
             }
         }
 
+        // 设置按钮
+        val settingsButton = JButton("⚙").apply {
+            toolTipText = "Configure Service Prefixes"
+            addActionListener {
+                showSettingsDialog()
+            }
+        }
+
+        // 按钮面板
+        val buttonPanel = JPanel(FlowLayout(FlowLayout.LEFT, 2, 0)).apply {
+            add(refreshButton)
+            add(settingsButton)
+        }
+
         // 搜索面板
         val searchPanel = JPanel(BorderLayout()).apply {
             border = BorderFactory.createEmptyBorder(8, 8, 4, 8)
             add(JLabel("Search: "), BorderLayout.WEST)
             add(searchField, BorderLayout.CENTER)
-            add(refreshButton, BorderLayout.EAST)
+            add(buttonPanel, BorderLayout.EAST)
         }
 
         // 历史记录面板
@@ -231,6 +246,42 @@ class ApiSearchPanel(private val project: Project) : JPanel(BorderLayout()) {
         resultList.model = DefaultListModel()
         statusLabel.text = "Enter keywords to search"
         searchField.requestFocusInWindow()
+    }
+
+    /**
+     * 显示服务名前缀配置对话框
+     */
+    private fun showSettingsDialog() {
+        val settings = ApiSearchSettings.getInstance(project)
+        val currentPrefixes = settings.getServicePrefixes().joinToString("\n")
+
+        val textArea = JTextArea(currentPrefixes).apply {
+            rows = 8
+            columns = 30
+            toolTipText = "Enter one service prefix per line, e.g.:\nuser\nuser-web\norder"
+        }
+
+        val panel = JPanel(BorderLayout()).apply {
+            add(JLabel("<html>Service prefixes (one per line):<br><small>For /api/{prefix}/xxx → /api/xxx matching</small></html>"), BorderLayout.NORTH)
+            add(JBScrollPane(textArea), BorderLayout.CENTER)
+        }
+
+        val result = JOptionPane.showConfirmDialog(
+            this,
+            panel,
+            "Configure Service Prefixes",
+            JOptionPane.OK_CANCEL_OPTION,
+            JOptionPane.PLAIN_MESSAGE
+        )
+
+        if (result == JOptionPane.OK_OPTION) {
+            val prefixes = textArea.text
+                .split("\n")
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+            settings.setServicePrefixes(prefixes)
+            statusLabel.text = "Saved ${prefixes.size} service prefix(es)"
+        }
     }
 }
 

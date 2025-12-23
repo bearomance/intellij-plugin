@@ -2,6 +2,7 @@ package com.github.bearomance.intellijplugin.services
 
 import com.github.bearomance.intellijplugin.model.ApiEndpoint
 import com.github.bearomance.intellijplugin.model.PersistedEndpoint
+import com.github.bearomance.intellijplugin.settings.ApiSearchSettings
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.components.Service
@@ -418,7 +419,7 @@ class EndpointService(private val project: Project) : Disposable {
      * 支持格式：
      * - /api/info
      * - POST /api/info
-     * - /api/user/info (会同时搜索 /api/info)
+     * - /api/user/info (如果 user 在服务名配置中，会同时搜索 /api/info)
      */
     fun searchEndpoints(query: String): List<ApiEndpoint> {
         val allEndpoints = cachedEndpoints
@@ -430,8 +431,8 @@ class EndpointService(private val project: Project) : Disposable {
         // 解析 HTTP 方法和路径
         val (httpMethod, pathQuery) = parseQuery(normalizedQuery)
 
-        // 搜索查询
-        val searchQuery = pathQuery
+        // 生成搜索变体（包含去掉服务名前缀的版本）
+        val searchQueries = generateSearchVariants(pathQuery)
 
         return allEndpoints.filter { endpoint ->
             // 标准化路径：将 {userId}, {id} 等统一为 {id}
@@ -442,12 +443,41 @@ class EndpointService(private val project: Project) : Disposable {
             // 如果指定了 HTTP 方法，必须匹配
             val methodMatches = httpMethod == null || endpoint.method.lowercase() == httpMethod
 
-            val contentMatches = pathLower.contains(searchQuery) ||
-                methodLower.contains(searchQuery) ||
-                moduleLower.contains(searchQuery)
+            // 任意一个搜索变体匹配即可
+            val contentMatches = searchQueries.any { searchQuery ->
+                pathLower.contains(searchQuery) ||
+                    methodLower.contains(searchQuery) ||
+                    moduleLower.contains(searchQuery)
+            }
 
             methodMatches && contentMatches
         }
+    }
+
+    /**
+     * 生成搜索变体
+     * 如果路径匹配 /api/{服务名}/xxx 格式，生成去掉服务名的变体
+     * 例如：/api/user/info -> ["/api/user/info", "/api/info"]
+     */
+    private fun generateSearchVariants(path: String): List<String> {
+        val variants = mutableListOf(path)
+        val servicePrefixes = ApiSearchSettings.getInstance(project).getServicePrefixes()
+
+        if (servicePrefixes.isEmpty()) return variants
+
+        // 匹配 /api/{服务名}/xxx 格式
+        for (prefix in servicePrefixes) {
+            val prefixLower = prefix.lowercase()
+            val pattern = "/api/$prefixLower/"
+
+            if (path.contains(pattern)) {
+                // 去掉服务名前缀：/api/user/info -> /api/info
+                val withoutPrefix = path.replace("/api/$prefixLower/", "/api/")
+                variants.add(withoutPrefix)
+            }
+        }
+
+        return variants
     }
 
     /**
