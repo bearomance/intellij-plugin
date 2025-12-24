@@ -431,9 +431,6 @@ class EndpointService(private val project: Project) : Disposable {
         // 解析 HTTP 方法和路径
         val (httpMethod, pathQuery) = parseQuery(normalizedQuery)
 
-        // 生成搜索变体（包含去掉服务名前缀的版本）
-        val searchQueries = generateSearchVariants(pathQuery)
-
         return allEndpoints.filter { endpoint ->
             // 标准化路径：将 {userId}, {id} 等统一为 {id}
             val pathLower = normalizePathForMatch(endpoint.path.lowercase())
@@ -443,37 +440,36 @@ class EndpointService(private val project: Project) : Disposable {
             // 如果指定了 HTTP 方法，必须匹配
             val methodMatches = httpMethod == null || endpoint.method.lowercase() == httpMethod
 
-            // 任意一个搜索变体匹配即可
-            val contentMatches = searchQueries.any { searchQuery ->
-                pathLower.contains(searchQuery) ||
-                    methodLower.contains(searchQuery) ||
-                    moduleLower.contains(searchQuery)
-            }
+            // 生成端点路径的所有变体（包含添加服务名前缀的版本）
+            val endpointPathVariants = generateEndpointPathVariants(pathLower)
+
+            // 检查搜索词是否匹配任意变体
+            val contentMatches = endpointPathVariants.any { variant ->
+                variant.contains(pathQuery)
+            } || methodLower.contains(pathQuery) || moduleLower.contains(pathQuery)
 
             methodMatches && contentMatches
         }
     }
 
     /**
-     * 生成搜索变体
-     * 如果路径匹配 /api/{服务名}/xxx 格式，生成去掉服务名的变体
-     * 例如：/api/user/info -> ["/api/user/info", "/api/info"]
+     * 为端点路径生成所有变体
+     * 如果配置了服务名 user，端点路径是 /api/info
+     * 则生成：["/api/info", "/api/user/info"]
      */
-    private fun generateSearchVariants(path: String): List<String> {
-        val variants = mutableListOf(path)
+    private fun generateEndpointPathVariants(endpointPath: String): List<String> {
+        val variants = mutableListOf(endpointPath)
         val servicePrefixes = ApiSearchSettings.getInstance(project).getServicePrefixes()
 
         if (servicePrefixes.isEmpty()) return variants
 
-        // 匹配 /api/{服务名}/xxx 格式
-        for (prefix in servicePrefixes) {
-            val prefixLower = prefix.lowercase()
-            val pattern = "/api/$prefixLower/"
-
-            if (path.contains(pattern)) {
-                // 去掉服务名前缀：/api/user/info -> /api/info
-                val withoutPrefix = path.replace("/api/$prefixLower/", "/api/")
-                variants.add(withoutPrefix)
+        // 如果端点路径是 /api/xxx 格式，为每个服务名生成 /api/{服务名}/xxx
+        if (endpointPath.startsWith("/api/")) {
+            for (prefix in servicePrefixes) {
+                val prefixLower = prefix.lowercase()
+                // /api/info -> /api/user/info
+                val withPrefix = endpointPath.replaceFirst("/api/", "/api/$prefixLower/")
+                variants.add(withPrefix)
             }
         }
 
